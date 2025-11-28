@@ -15,6 +15,7 @@ const multer = require("multer");
 const { Client, LocalAuth, MessageMedia, Location } = require("whatsapp-web.js");
 
 const PORT = process.env.PORT || 3001;
+// FRONT_ORIGIN оставим, но CORS делаем максимально широким
 const FRONT_ORIGIN = process.env.FRONT_ORIGIN || "*";
 const SESS_PATH = path.resolve(__dirname, ".sessions");
 const DATA_PATH = path.resolve(__dirname, ".data");
@@ -41,7 +42,6 @@ process.on("unhandledRejection", (reason) => {
     );
     return;
   }
-  // остальные ошибки хотя бы логируем, но процесс не валим
 });
 
 process.on("uncaughtException", (err) => {
@@ -52,20 +52,21 @@ process.on("uncaughtException", (err) => {
     );
     return;
   }
-  // тут тоже не делаем process.exit, чтобы Render не перезапускал контейнер
 });
 
 const app = express();
 if (compression) app.use(compression());
 app.use(express.json({ limit: "20mb" }));
-app.use(
-  cors({
-    origin: FRONT_ORIGIN,
-    credentials: true,
-    methods: ["GET", "POST", "PATCH", "OPTIONS"],
-  })
-);
-app.options("*", cors());
+
+// общий CORS для HTTP — разрешаем ЛЮБОЙ origin (localhost, прод, всё)
+const corsOptions = {
+  origin: (origin, cb) => cb(null, true), // доверяем всем
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "OPTIONS"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use("/uploads", express.static(UPLOADS));
 
 /**
@@ -80,8 +81,14 @@ app.get("/", (req, res) => {
 });
 
 const server = http.createServer(app);
+
+// CORS для WebSocket (socket.io) — тоже максимально расслабленный
 const io = new Server(server, {
-  cors: { origin: FRONT_ORIGIN, methods: ["GET", "POST", "PATCH"] },
+  cors: {
+    origin: "*", // разрешаем WS с любого origin
+    methods: ["GET", "POST", "PATCH", "OPTIONS"],
+  },
+  allowEIO3: true, // на всякий случай для старых клиентов
 });
 
 const upload = multer({
@@ -221,6 +228,7 @@ if (!fs.existsSync(ANALYTICS_FILE)) {
     );
   } catch {}
 }
+
 const readAnalytics = () =>
   safeRead(ANALYTICS_FILE, { events: [], savedAt: 0 });
 
@@ -365,7 +373,6 @@ const attachClientEvents = (c) => {
     console.warn("WA disconnected:", reason);
     isReady = false;
     io.emit("status", { ready: false, step: "disconnected", reason });
-    // мягко пробуем перегрузить клиента
     scheduleBoot(5000);
   });
 
@@ -545,7 +552,7 @@ const bootClient = async () => {
   } catch (e) {
     console.error("WA init failed:", e?.message || e);
     isReady = false;
-    scheduleBoot(15000); // пробуем ещё раз через 15 сек
+    scheduleBoot(15000);
   }
 };
 
