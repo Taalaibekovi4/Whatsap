@@ -15,7 +15,6 @@ const multer = require("multer");
 const { Client, LocalAuth, MessageMedia, Location } = require("whatsapp-web.js");
 
 const PORT = process.env.PORT || 3001;
-// FRONT_ORIGIN оставим, но CORS делаем максимально широким
 const FRONT_ORIGIN = process.env.FRONT_ORIGIN || "*";
 const SESS_PATH = path.resolve(__dirname, ".sessions");
 const DATA_PATH = path.resolve(__dirname, ".data");
@@ -26,45 +25,52 @@ fs.mkdirSync(DATA_PATH, { recursive: true });
 fs.mkdirSync(UPLOADS, { recursive: true });
 
 /* ===== глобальные ловушки ошибок Puppeteer / whatsapp-web.js ===== */
-const isPuppeteerNavError = (err) => {
+// игнорим мягкие ошибки, которые часто сыплет puppeteer:
+// - execution context was destroyed
+// - context was destroyed
+// - target closed
+// - ProtocolError (Runtime.callFunctionOn)
+const isPuppeteerSoftError = (err) => {
   const msg = String((err && err.message) || err || "").toLowerCase();
+  if (!msg) return false;
   return (
     msg.includes("execution context was destroyed") ||
-    msg.includes("context was destroyed")
+    msg.includes("context was destroyed") ||
+    msg.includes("target closed") ||
+    (msg.includes("protocolerror") && msg.includes("runtime.callfunctionon"))
   );
 };
 
 process.on("unhandledRejection", (reason) => {
-  console.error("UNHANDLED REJECTION:", reason);
-  if (isPuppeteerNavError(reason)) {
+  if (isPuppeteerSoftError(reason)) {
     console.warn(
-      "Игнорируем puppeteer navigation ошибку (execution context was destroyed)"
+      "Игнорируем мягкую puppeteer-ошибку (navigation/target closed/protocol)..."
     );
     return;
   }
+  console.error("UNHANDLED REJECTION:", reason);
 });
 
 process.on("uncaughtException", (err) => {
-  console.error("UNCAUGHT EXCEPTION:", err);
-  if (isPuppeteerNavError(err)) {
+  if (isPuppeteerSoftError(err)) {
     console.warn(
-      "Игнорируем puppeteer navigation ошибку (execution context was destroyed)"
+      "Игнорируем мягкую puppeteer-ошибку (navigation/target closed/protocol)..."
     );
     return;
   }
+  console.error("UNCAUGHT EXCEPTION:", err);
 });
 
 const app = express();
 if (compression) app.use(compression());
 app.use(express.json({ limit: "20mb" }));
 
-// общий CORS для HTTP — разрешаем ЛЮБОЙ origin (localhost, прод, всё)
+// общий CORS для HTTP — разрешаем любой origin
 const corsOptions = {
-  origin: (origin, cb) => cb(null, true), // доверяем всем
+  origin: (origin, cb) => cb(null, true),
   credentials: true,
   methods: ["GET", "POST", "PATCH", "OPTIONS"],
 };
-
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 app.use("/uploads", express.static(UPLOADS));
@@ -82,13 +88,13 @@ app.get("/", (req, res) => {
 
 const server = http.createServer(app);
 
-// CORS для WebSocket (socket.io) — тоже максимально расслабленный
+// CORS для WebSocket (socket.io) — максимально свободный
 const io = new Server(server, {
   cors: {
-    origin: "*", // разрешаем WS с любого origin
+    origin: "*",
     methods: ["GET", "POST", "PATCH", "OPTIONS"],
   },
-  allowEIO3: true, // на всякий случай для старых клиентов
+  allowEIO3: true,
 });
 
 const upload = multer({
@@ -103,6 +109,9 @@ const msgFile = (chatId) =>
     DATA_PATH,
     `messages_${String(chatId || "").replace(/[^a-zA-Z0-9_.@-]/g, "_")}.json`
   );
+
+const ANALYTICS_FILE = path.join(DATA_PATH, "analytics.json");
+const GREET_FILE = path.join(DATA_PATH, "greetings.json");
 
 const safeRead = (file, fallback) => {
   try {
@@ -218,8 +227,7 @@ const persistAndEmit = (chatId, mapped) => {
   io.emit("message", mapped);
 };
 
-// ===== analytics storage =====
-const ANALYTICS_FILE = path.join(DATA_PATH, "analytics.json");
+/* ===== analytics storage ===== */
 if (!fs.existsSync(ANALYTICS_FILE)) {
   try {
     fs.writeFileSync(
@@ -252,8 +260,7 @@ const pushEventUniqueMonthly = (type, chatId, ts) => {
   } catch {}
 };
 
-// ===== greetings (auto-reply) =====
-const GREET_FILE = path.join(DATA_PATH, "greetings.json");
+/* ===== greetings (auto-reply) ===== */
 if (!fs.existsSync(GREET_FILE)) {
   try {
     fs.writeFileSync(
@@ -283,7 +290,7 @@ const GREET_COOLDOWN_SEC = Number(
 const GREET_DELAY_MS = Number(process.env.GREET_DELAY_MS || 5000);
 const pendingGreeting = new Set();
 
-// ===== WA state =====
+/* ===== WA state ===== */
 let client = null;
 let isReady = false;
 let lastQR = null;
@@ -388,7 +395,7 @@ const attachClientEvents = (c) => {
     const mapped = mapMessage(msg, chatId);
     persistAndEmit(chatId, mapped);
 
-    // auto greeting: only incoming, not group, per-chat 3h cooldown, 5s delay
+    // auto greeting
     try {
       if (!mapped.fromMe && !isGroup && isReady) {
         const last = lastGreetTs(chatId);
@@ -413,6 +420,7 @@ const attachClientEvents = (c) => {
       }
     } catch {}
 
+    // обновление chats.json
     try {
       const store = safeRead(chatsFile(), { results: [] });
       const arr = store.results || [];
@@ -550,7 +558,13 @@ const bootClient = async () => {
     await client.initialize();
     console.log("WhatsApp client initialized");
   } catch (e) {
-    console.error("WA init failed:", e?.message || e);
+    if (isPuppeteerSoftError(e)) {
+      console.warn(
+        "Мягкая ошибка при init клиента, пробуем ещё раз позже..."
+      );
+    } else {
+      console.error("WA init failed:", e?.message || e);
+    }
     isReady = false;
     scheduleBoot(15000);
   }
