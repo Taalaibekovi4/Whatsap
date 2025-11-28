@@ -23,11 +23,46 @@ const UPLOADS = path.resolve(__dirname, "uploads");
 fs.mkdirSync(DATA_PATH, { recursive: true });
 fs.mkdirSync(UPLOADS, { recursive: true });
 
+/* ===== Глобальные ловушки ошибок puppeteer / whatsapp-web.js ===== */
+
+const isPuppeteerSoftError = (err) => {
+  const msg = String((err && err.message) || err || "").toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes("execution context was destroyed") ||
+    msg.includes("context was destroyed") ||
+    msg.includes("target closed") ||
+    (msg.includes("protocolerror") && msg.includes("runtime.callfunctionon"))
+  );
+};
+
+process.on("unhandledRejection", (reason) => {
+  if (isPuppeteerSoftError(reason)) {
+    console.warn(
+      "Игнорируем мягкую puppeteer-ошибку (navigation/target closed/protocol)..."
+    );
+    return;
+  }
+  console.error("UNHANDLED REJECTION:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  if (isPuppeteerSoftError(err)) {
+    console.warn(
+      "Игнорируем мягкую puppeteer-ошибку (navigation/target closed/protocol)..."
+    );
+    return;
+  }
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
+
+/* ===== express / cors ===== */
+
 const app = express();
 if (compression) app.use(compression());
 app.use(express.json({ limit: "20mb" }));
 
-// ===== CORS (HTTP) — разрешаем все источники, чтобы не ловить ошибки с фронта =====
+// максимально свободный CORS для HTTP
 const corsOptions = {
   origin: (origin, cb) => cb(null, true),
   credentials: true,
@@ -38,9 +73,6 @@ app.options("*", cors(corsOptions));
 
 app.use("/uploads", express.static(UPLOADS));
 
-/**
- * Корневой маршрут — чтобы Render не писал "Cannot GET /"
- */
 app.get("/", (req, res) => {
   res.send(
     `<h1>WhatsApp backend is running ✅</h1>
@@ -50,7 +82,7 @@ app.get("/", (req, res) => {
 
 const server = http.createServer(app);
 
-// ===== socket.io (WebSocket) — тоже открытый CORS =====
+// ===== socket.io (websocket) =====
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -319,7 +351,7 @@ const attachClientEvents = (c) => {
     const mapped = mapMessage(msg, chatId);
     persistAndEmit(chatId, mapped);
 
-    // auto greeting: only incoming, not group, per-chat 3h cooldown, 5s delay
+    // auto greeting
     try {
       if (!mapped.fromMe && !isGroup && isReady) {
         const last = lastGreetTs(chatId);
@@ -453,8 +485,9 @@ const initialSync = async () => {
   io.emit("chats-refresh");
 };
 
-// вместо bootClient()
+// boot клиента
 const bootClient = async () => {
+  console.log("Booting WhatsApp client...");
   try {
     if (client) await client.destroy();
   } catch {}
@@ -472,7 +505,13 @@ const bootClient = async () => {
     await client.initialize();
     console.log("Клиент WhatsApp инициализирован");
   } catch (e) {
-    console.error("WA init failed:", e?.message || e);
+    if (isPuppeteerSoftError(e)) {
+      console.warn(
+        "Мягкая ошибка при init клиента, пробуем ещё раз через 15с..."
+      );
+    } else {
+      console.error("WA init failed:", e?.message || e);
+    }
     isReady = false;
     setTimeout(bootClient, 15000);
   }
@@ -921,7 +960,7 @@ app.post("/logout", async (req, res) => {
       await fsp.rm(SESS_PATH, { recursive: true, force: true });
     } catch {}
     lastQR = null;
-    await bootClient();
+    bootClient();
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: "LOGOUT_FAILED" });
