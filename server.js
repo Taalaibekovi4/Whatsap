@@ -19,8 +19,41 @@ const FRONT_ORIGIN = process.env.FRONT_ORIGIN || "*";
 const SESS_PATH = path.resolve(__dirname, ".sessions");
 const DATA_PATH = path.resolve(__dirname, ".data");
 const UPLOADS = path.resolve(__dirname, "uploads");
+
+// создаём директории для данных/загрузок
 fs.mkdirSync(DATA_PATH, { recursive: true });
 fs.mkdirSync(UPLOADS, { recursive: true });
+
+/* ===== глобальные ловушки ошибок Puppeteer / whatsapp-web.js ===== */
+const isPuppeteerNavError = (err) => {
+  const msg = String((err && err.message) || err || "").toLowerCase();
+  return (
+    msg.includes("execution context was destroyed") ||
+    msg.includes("context was destroyed")
+  );
+};
+
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+  if (isPuppeteerNavError(reason)) {
+    console.warn(
+      "Игнорируем puppeteer navigation ошибку (execution context was destroyed)"
+    );
+    return;
+  }
+  // остальные ошибки хотя бы логируем, но процесс не валим
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+  if (isPuppeteerNavError(err)) {
+    console.warn(
+      "Игнорируем puppeteer navigation ошибку (execution context was destroyed)"
+    );
+    return;
+  }
+  // тут тоже не делаем process.exit, чтобы Render не перезапускал контейнер
+});
 
 const app = express();
 if (compression) app.use(compression());
@@ -63,6 +96,7 @@ const msgFile = (chatId) =>
     DATA_PATH,
     `messages_${String(chatId || "").replace(/[^a-zA-Z0-9_.@-]/g, "_")}.json`
   );
+
 const safeRead = (file, fallback) => {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -70,11 +104,13 @@ const safeRead = (file, fallback) => {
     return fallback;
   }
 };
+
 const atomicWrite = (file, obj) => {
   const tmp = file + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
   fs.renameSync(tmp, file);
 };
+
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 const sortChats = (list) =>
@@ -89,12 +125,14 @@ const sortChats = (list) =>
       if (bt !== at) return bt - at;
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
+
 const sanitizeId = (s) => {
   const v = String(s || "");
   if (/@(c|g)\.us$/i.test(v)) return v;
   const d = v.replace(/\D/g, "");
   return d ? d + "@c.us" : v;
 };
+
 const normalizeTarget = ({ chatId, to }) =>
   chatId ? sanitizeId(chatId) : to ? sanitizeId(to) : null;
 
@@ -116,6 +154,7 @@ const previewFromMessage = (m) => {
   if (!body) return t || "Сообщение";
   return body.slice(0, 140);
 };
+
 const mapMessage = (m, chatId) => {
   const base = {
     id: m?.id?._serialized || null,
@@ -128,16 +167,19 @@ const mapMessage = (m, chatId) => {
     type: m.type || "chat",
     hasMedia: !!m.hasMedia,
   };
+
   if (m.hasQuotedMsg && m._data?.quotedStanzaID) {
     base.quotedMessageId = m._data.quotedStanzaID;
     base.quotedBody = m._data?.quotedMsg?.body || "";
   }
+
   if (m.type === "location" && m.location)
     base.location = {
       latitude: m.location.latitude,
       longitude: m.location.longitude,
       description: m.location.description || "",
     };
+
   if (
     (m.type === "vcard" ||
       m.type === "contact" ||
@@ -148,9 +190,11 @@ const mapMessage = (m, chatId) => {
     base.vcard = m.vCards[0];
     base.type = "vcard";
   }
+
   if (m.type === "buttons_response") base.type = "buttons_response";
   if (m.type === "list_response") base.type = "list_response";
   if (m.type === "reaction") base.type = "reaction";
+
   base.preview = previewFromMessage(base);
   return base;
 };
@@ -179,11 +223,13 @@ if (!fs.existsSync(ANALYTICS_FILE)) {
 }
 const readAnalytics = () =>
   safeRead(ANALYTICS_FILE, { events: [], savedAt: 0 });
+
 const sameMonth = (a, b) => {
   const A = new Date(a * 1000),
     B = new Date(b * 1000);
   return A.getFullYear() === B.getFullYear() && A.getMonth() === B.getMonth();
 };
+
 const pushEventUniqueMonthly = (type, chatId, ts) => {
   try {
     const a = readAnalytics();
@@ -208,7 +254,9 @@ if (!fs.existsSync(GREET_FILE)) {
     );
   } catch {}
 }
+
 const readGreet = () => safeRead(GREET_FILE, { byChat: {}, savedAt: 0 });
+
 const saveGreetTs = (chatId, ts) => {
   try {
     const g = readGreet();
@@ -217,8 +265,10 @@ const saveGreetTs = (chatId, ts) => {
     atomicWrite(GREET_FILE, g);
   } catch {}
 };
+
 const lastGreetTs = (chatId) =>
   Number(readGreet().byChat?.[String(chatId)] || 0);
+
 const GREET_COOLDOWN_SEC = Number(
   process.env.GREET_COOLDOWN_SEC || 3 * 60 * 60
 );
@@ -229,6 +279,20 @@ const pendingGreeting = new Set();
 let client = null;
 let isReady = false;
 let lastQR = null;
+
+// флаг и планировщик безопасного перезапуска клиента
+let booting = false;
+const scheduleBoot = (delayMs = 15000) => {
+  if (booting) return;
+  booting = true;
+  setTimeout(async () => {
+    try {
+      await bootClient();
+    } finally {
+      booting = false;
+    }
+  }, delayMs);
+};
 
 // Update helpers for chats.json and patches
 const upsertChatLast = (target, lastVal, ts) => {
@@ -283,9 +347,11 @@ const attachClientEvents = (c) => {
     io.emit("qr", { dataUrl: lastQR });
     io.emit("status", { ready: false, step: "qr" });
   });
+
   c.on("authenticated", () =>
     io.emit("status", { ready: false, step: "authenticated" })
   );
+
   c.on("ready", async () => {
     isReady = true;
     lastQR = null;
@@ -294,9 +360,13 @@ const attachClientEvents = (c) => {
       await initialSync();
     } catch {}
   });
-  c.on("disconnected", () => {
+
+  c.on("disconnected", (reason) => {
+    console.warn("WA disconnected:", reason);
     isReady = false;
-    io.emit("status", { ready: false, step: "disconnected" });
+    io.emit("status", { ready: false, step: "disconnected", reason });
+    // мягко пробуем перегрузить клиента
+    scheduleBoot(5000);
   });
 
   const handleIncoming = async (msg) => {
@@ -307,6 +377,7 @@ const attachClientEvents = (c) => {
       chatId = chat?.id?._serialized || chatId;
       isGroup = !!chat?.isGroup;
     } catch {}
+
     const mapped = mapMessage(msg, chatId);
     persistAndEmit(chatId, mapped);
 
@@ -326,7 +397,8 @@ const attachClientEvents = (c) => {
                 "Здравствуйте! Мы получили ваше сообщение и скоро ответим."
               );
               saveGreetTs(chatId, nowSec());
-            } catch {} finally {
+            } catch {
+            } finally {
               pendingGreeting.delete(chatId);
             }
           }, GREET_DELAY_MS);
@@ -444,11 +516,17 @@ const initialSync = async () => {
   io.emit("chats-refresh");
 };
 
-// вместо bootClient()
+// клиент с безопасным авто-перезапуском
 const bootClient = async () => {
+  console.log("Booting WhatsApp client...");
   try {
-    if (client) await client.destroy();
+    if (client) {
+      try {
+        await client.destroy();
+      } catch {}
+    }
   } catch {}
+
   client = new Client({
     authStrategy: new LocalAuth({
       clientId: "default",
@@ -458,16 +536,21 @@ const bootClient = async () => {
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     },
   });
+
   attachClientEvents(client);
+
   try {
     await client.initialize();
+    console.log("WhatsApp client initialized");
   } catch (e) {
     console.error("WA init failed:", e?.message || e);
     isReady = false;
-    setTimeout(bootClient, 15000);
+    scheduleBoot(15000); // пробуем ещё раз через 15 сек
   }
 };
-bootClient();
+
+// стартуем клиента
+scheduleBoot(0);
 
 // ===== sockets =====
 io.on("connection", (socket) => {
@@ -486,6 +569,7 @@ app.get("/status", (req, res) =>
     version: "stable-fallback-1",
   })
 );
+
 app.get("/qr", (req, res) =>
   lastQR
     ? res.json({ dataUrl: lastQR })
@@ -911,7 +995,7 @@ app.post("/logout", async (req, res) => {
       await fsp.rm(SESS_PATH, { recursive: true, force: true });
     } catch {}
     lastQR = null;
-    await bootClient();
+    scheduleBoot(0);
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: "LOGOUT_FAILED" });
