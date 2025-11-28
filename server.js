@@ -11,21 +11,25 @@ const qrcode = require("qrcode");
 const path = require("path");
 const fs = require("fs");
 const fsp = require("fs/promises");
-const multer = require("multer");
-const { Client, LocalAuth, MessageMedia, Location } = require("whatsapp-web.js");
+// const multer = require("multer");
+const {
+  Client,
+  LocalAuth,
+  // MessageMedia,
+  Location,
+} = require("whatsapp-web.js");
 
 const PORT = process.env.PORT || 3001;
 const FRONT_ORIGIN = process.env.FRONT_ORIGIN || "*";
 const SESS_PATH = path.resolve(__dirname, ".sessions");
 const DATA_PATH = path.resolve(__dirname, ".data");
-const UPLOADS = path.resolve(__dirname, "uploads");
-
+// const UPLOADS = path.resolve(__dirname, "uploads");
 fs.mkdirSync(DATA_PATH, { recursive: true });
-fs.mkdirSync(UPLOADS, { recursive: true });
+// fs.mkdirSync(UPLOADS, { recursive: true });
 
-/* ===== Глобальные ловушки ошибок puppeteer / whatsapp-web.js ===== */
+/* ===== ГЛОБАЛЬНЫЕ ЛОВУШКИ ОШИБОК WHATSAPP/PUPEETEER ===== */
 
-const isPuppeteerSoftError = (err) => {
+const isSoftPuppeteerError = (err) => {
   const msg = String((err && err.message) || err || "").toLowerCase();
   if (!msg) return false;
   return (
@@ -37,23 +41,25 @@ const isPuppeteerSoftError = (err) => {
 };
 
 process.on("unhandledRejection", (reason) => {
-  if (isPuppeteerSoftError(reason)) {
+  if (isSoftPuppeteerError(reason)) {
     console.warn(
       "Игнорируем мягкую puppeteer-ошибку (navigation/target closed/protocol)..."
     );
     return;
   }
   console.error("UNHANDLED REJECTION:", reason);
+  // ВАЖНО: процесс не падает
 });
 
 process.on("uncaughtException", (err) => {
-  if (isPuppeteerSoftError(err)) {
+  if (isSoftPuppeteerError(err)) {
     console.warn(
       "Игнорируем мягкую puppeteer-ошибку (navigation/target closed/protocol)..."
     );
     return;
   }
   console.error("UNCAUGHT EXCEPTION:", err);
+  // Тоже не вылетаем
 });
 
 /* ===== express / cors ===== */
@@ -61,40 +67,31 @@ process.on("uncaughtException", (err) => {
 const app = express();
 if (compression) app.use(compression());
 app.use(express.json({ limit: "20mb" }));
+app.use(
+  cors({
+    origin: FRONT_ORIGIN,
+    credentials: true,
+    methods: ["GET", "POST", "PATCH", "OPTIONS"],
+  })
+);
+app.options("*", cors());
 
-// максимально свободный CORS для HTTP
-const corsOptions = {
-  origin: (origin, cb) => cb(null, true),
-  credentials: true,
-  methods: ["GET", "POST", "PATCH", "OPTIONS"],
-};
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+// app.use("/uploads", express.static(UPLOADS));
 
-app.use("/uploads", express.static(UPLOADS));
-
+// простой корневой маршрут, чтобы проверять, жив ли бэкенд
 app.get("/", (req, res) => {
   res.send(
     `<h1>WhatsApp backend is running ✅</h1>
-     <p>Попробуй <code>/status</code>, <code>/qr</code>, <code>/chats</code>, <code>/messages?chatId=...</code></p>`
+     <p>Проверь <code>/status</code>, <code>/qr</code>, <code>/chats</code>, <code>/messages?chatId=...</code></p>`
   );
 });
 
 const server = http.createServer(app);
-
-// ===== socket.io (websocket) =====
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST", "PATCH", "OPTIONS"],
-  },
-  allowEIO3: true,
+  cors: { origin: FRONT_ORIGIN, methods: ["GET", "POST", "PATCH"] },
 });
 
-const upload = multer({
-  dest: UPLOADS,
-  limits: { fileSize: 25 * 1024 * 1024 },
-});
+// const upload = multer({ dest: UPLOADS, limits: { fileSize: 25 * 1024 * 1024 } });
 
 // ===== utils =====
 const chatsFile = () => path.join(DATA_PATH, "chats.json");
@@ -118,17 +115,15 @@ const atomicWrite = (file, obj) => {
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 const sortChats = (list) =>
-  (list || [])
-    .slice()
-    .sort((a, b) => {
-      if (!!b.pinned - !!a.pinned) return !!b.pinned - !!a.pinned;
-      if (!!b.unreadCount - !!a.unreadCount)
-        return !!b.unreadCount - !!a.unreadCount;
-      const at = Number(a.lastTs || 0),
-        bt = Number(b.lastTs || 0);
-      if (bt !== at) return bt - at;
-      return String(a.name || "").localeCompare(String(b.name || ""));
-    });
+  (list || []).slice().sort((a, b) => {
+    if (!!b.pinned - !!a.pinned) return !!b.pinned - !!a.pinned;
+    if (!!b.unreadCount - !!a.unreadCount)
+      return !!b.unreadCount - !!a.unreadCount;
+    const at = Number(a.lastTs || 0),
+      bt = Number(b.lastTs || 0);
+    if (bt !== at) return bt - at;
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
 const sanitizeId = (s) => {
   const v = String(s || "");
   if (/@(c|g)\.us$/i.test(v)) return v;
@@ -148,7 +143,8 @@ const previewFromMessage = (m) => {
   if (t === "sticker") return "Стикер";
   if (t === "document") return "Документ";
   if (t === "location") return "Локация";
-  if (t === "vcard" || t === "contact" || t === "contact_card") return "Контакт";
+  if (t === "vcard" || t === "contact" || t === "contact_card")
+    return "Контакт";
   if (t === "buttons_response") return body || "Ответ кнопкой";
   if (t === "list_response") return body || "Выбор из списка";
   if (t === "reaction") return "Реакция";
@@ -179,9 +175,7 @@ const mapMessage = (m, chatId) => {
       description: m.location.description || "",
     };
   if (
-    (m.type === "vcard" ||
-      m.type === "contact" ||
-      m.type === "contact_card") &&
+    (m.type === "vcard" || m.type === "contact" || m.type === "contact_card") &&
     Array.isArray(m.vCards) &&
     m.vCards.length
   ) {
@@ -280,10 +274,7 @@ const upsertChatLast = (target, lastVal, ts) => {
     arr[ix].lastTs = ts;
     if (!arr[ix].status)
       arr[ix].status = arr[ix].isLead === true ? "lead" : "client";
-    atomicWrite(chatsFile(), {
-      results: sortChats(arr),
-      savedAt: Date.now(),
-    });
+    atomicWrite(chatsFile(), { results: sortChats(arr), savedAt: Date.now() });
     io.emit("chat-patch", {
       id: target,
       last: arr[ix].last,
@@ -351,7 +342,7 @@ const attachClientEvents = (c) => {
     const mapped = mapMessage(msg, chatId);
     persistAndEmit(chatId, mapped);
 
-    // auto greeting
+    // auto greeting: only incoming, not group, per-chat 3h cooldown, 5s delay
     try {
       if (!mapped.fromMe && !isGroup && isReady) {
         const last = lastGreetTs(chatId);
@@ -367,7 +358,8 @@ const attachClientEvents = (c) => {
                 "Здравствуйте! Мы получили ваше сообщение и скоро ответим."
               );
               saveGreetTs(chatId, nowSec());
-            } catch {} finally {
+            } catch {
+            } finally {
               pendingGreeting.delete(chatId);
             }
           }, GREET_DELAY_MS);
@@ -379,17 +371,14 @@ const attachClientEvents = (c) => {
       const store = safeRead(chatsFile(), { results: [] });
       const arr = store.results || [];
       const ts = Number(mapped.timestamp || nowSec());
-      const lastVal =
-        mapped.preview || mapped.body || `(${mapped.type})`;
+      const lastVal = mapped.preview || mapped.body || `(${mapped.type})`;
       const ix = arr.findIndex((x) => x.id === chatId);
       if (ix >= 0) {
         const rec = arr[ix];
         rec.last = lastVal;
         rec.lastTs = ts;
-        if (!mapped.fromMe)
-          rec.unreadCount = (rec.unreadCount || 0) + 1;
-        if (!rec.status)
-          rec.status = rec.isLead === true ? "lead" : "client";
+        if (!mapped.fromMe) rec.unreadCount = (rec.unreadCount || 0) + 1;
+        if (!rec.status) rec.status = rec.isLead === true ? "lead" : "client";
         atomicWrite(chatsFile(), {
           results: sortChats(arr),
           savedAt: Date.now(),
@@ -427,8 +416,14 @@ const attachClientEvents = (c) => {
     } catch {}
   };
 
+  // входящие сообщения
   c.on("message", handleIncoming);
-  c.on("message_create", handleIncoming);
+
+  // сообщения, созданные нашим аккаунтом
+  c.on("message_create", (msg) => {
+    if (!msg.fromMe) return;
+    handleIncoming(msg);
+  });
 };
 
 const initialSync = async () => {
@@ -437,8 +432,7 @@ const initialSync = async () => {
     .filter((c) => !/status@broadcast/i.test(c?.id?._serialized || ""))
     .map((c) => {
       const id = c?.id?._serialized;
-      const name =
-        c.name || c.formattedTitle || c.id?.user || id;
+      const name = c.name || c.formattedTitle || c.id?.user || id;
       return {
         id,
         name,
@@ -454,8 +448,7 @@ const initialSync = async () => {
     });
 
   try {
-    const prev =
-      safeRead(chatsFile(), { results: [] }).results || [];
+    const prev = safeRead(chatsFile(), { results: [] }).results || [];
     const byId = new Map(prev.map((x) => [x.id, x]));
     for (const x of mapped) {
       const old = byId.get(x.id);
@@ -463,51 +456,47 @@ const initialSync = async () => {
         x.last = old.last || x.last;
         x.lastTs = old.lastTs || x.lastTs;
         x.unreadCount =
-          typeof old.unreadCount === "number"
-            ? old.unreadCount
-            : x.unreadCount;
-        x.isLead =
-          typeof old.isLead === "boolean" ? old.isLead : x.isLead;
+          typeof old.unreadCount === "number" ? old.unreadCount : x.unreadCount;
+        x.isLead = typeof old.isLead === "boolean" ? old.isLead : x.isLead;
         x.pinned = !!old.pinned;
         x.archived = !!old.archived;
         x.name = old.name || x.name;
-        x.status =
-          old.status ||
-          (old.isLead === true ? "lead" : "client");
+        x.status = old.status || (old.isLead === true ? "lead" : "client");
       }
     }
   } catch {}
 
-  atomicWrite(chatsFile(), {
-    results: sortChats(mapped),
-    savedAt: Date.now(),
-  });
+  atomicWrite(chatsFile(), { results: sortChats(mapped), savedAt: Date.now() });
   io.emit("chats-refresh");
 };
 
-// boot клиента
+try {
+  fs.rmSync(".wwebjs_cache", { recursive: true, force: true });
+} catch {}
+
+// bootClient
 const bootClient = async () => {
-  console.log("Booting WhatsApp client...");
   try {
     if (client) await client.destroy();
   } catch {}
   client = new Client({
-    authStrategy: new LocalAuth({
-      clientId: "default",
-      dataPath: SESS_PATH,
-    }),
-    puppeteer: {
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    },
+    authStrategy: new LocalAuth({ clientId: "default", dataPath: SESS_PATH }),
+    puppeteer: { args: ["--no-sandbox", "--disable-setuid-sandbox"] },
+
+    /** Отключаем вообще всё скачивание медиа (дальше сами не качаем) */
+    downloadMedia: false,
+
+    /** Отключаем кеш web версии */
+    webVersionCache: { type: "none" },
   });
   attachClientEvents(client);
   try {
     await client.initialize();
     console.log("Клиент WhatsApp инициализирован");
   } catch (e) {
-    if (isPuppeteerSoftError(e)) {
+    if (isSoftPuppeteerError(e)) {
       console.warn(
-        "Мягкая ошибка при init клиента, пробуем ещё раз через 15с..."
+        "Мягкая ошибка при init клиента, перезапуск через 15 сек..."
       );
     } else {
       console.error("WA init failed:", e?.message || e);
@@ -546,47 +535,29 @@ app.get("/chats", (req, res) => {
     const scope = String(req.query.scope || "").toLowerCase();
     const statusQ = String(req.query.status || "").toLowerCase();
     const onlyLeads =
-      scope === "leads" ||
-      req.query.lead === "1" ||
-      statusQ === "lead";
-    const onlyClients =
-      scope === "clients" || statusQ === "client";
-    const onlyDeclined =
-      scope === "declined" || statusQ === "declined";
+      scope === "leads" || req.query.lead === "1" || statusQ === "lead";
+    const onlyClients = scope === "clients" || statusQ === "client";
+    const onlyDeclined = scope === "declined" || statusQ === "declined";
 
     const stored = safeRead(chatsFile(), { results: [] });
     const arr = (stored.results || []).map((x) => ({
       ...x,
-      status:
-        x.status || (x.isLead === true ? "lead" : "client"),
+      status: x.status || (x.isLead === true ? "lead" : "client"),
     }));
 
     let base = arr;
-    if (onlyLeads)
-      base = arr.filter(
-        (x) => (x.status || "lead") === "lead"
-      );
+    if (onlyLeads) base = arr.filter((x) => (x.status || "lead") === "lead");
     else if (onlyClients)
-      base = arr.filter(
-        (x) => (x.status || "client") === "client"
-      );
+      base = arr.filter((x) => (x.status || "client") === "client");
     else if (onlyDeclined)
-      base = arr.filter(
-        (x) => (x.status || "") === "declined"
-      );
+      base = arr.filter((x) => (x.status || "") === "declined");
 
     const withPreviews = base.map((c) => {
       if (!c.last || !Number(c.lastTs)) {
-        const ms =
-          safeRead(msgFile(c.id), {
-            results: [],
-          }).results || [];
+        const ms = safeRead(msgFile(c.id), { results: [] }).results || [];
         const last = ms[ms.length - 1];
         if (last) {
-          c.last =
-            last.preview ||
-            last.body ||
-            `(${last.type})`;
+          c.last = last.preview || last.body || `(${last.type})`;
           c.lastTs = Number(last.timestamp || 0);
         }
       }
@@ -603,10 +574,7 @@ app.post("/refresh-chats", async (req, res) => {
   try {
     await initialSync();
     const stored = safeRead(chatsFile(), { results: [] });
-    res.json({
-      ok: true,
-      count: (stored.results || []).length,
-    });
+    res.json({ ok: true, count: (stored.results || []).length });
   } catch {
     res.status(500).json({ error: "REFRESH_FAILED" });
   }
@@ -615,19 +583,13 @@ app.post("/refresh-chats", async (req, res) => {
 // ---- MESSAGES ----
 app.get("/messages", async (req, res) => {
   const raw = req.query.chatId;
-  let limit = Math.max(
-    1,
-    Math.min(Number(req.query.limit || 200), 400)
-  );
+  let limit = Math.max(1, Math.min(Number(req.query.limit || 200), 400));
   if (!raw) return res.status(400).json({ error: "BAD_REQUEST" });
   const id = sanitizeId(raw);
 
   const fallback = () => {
     const stored = safeRead(msgFile(id), { results: [] });
-    return res.json({
-      results: stored.results || [],
-      live: false,
-    });
+    return res.json({ results: stored.results || [], live: false });
   };
 
   try {
@@ -637,33 +599,13 @@ app.get("/messages", async (req, res) => {
       const chat = await client.getChatById(String(id));
       const messages = await chat.fetchMessages({ limit });
       mapped = [];
-      const MEDIA_LAST = 12;
       for (let i = 0; i < messages.length; i++) {
         const m = messages[i];
         const mm = mapMessage(m, id);
-        if (
-          messages.length - i <= MEDIA_LAST &&
-          m.hasMedia &&
-          ["image", "sticker", "audio", "ptt", "video", "document"].includes(
-            mm.type
-          )
-        ) {
-          try {
-            const media = await m.downloadMedia();
-            if (media)
-              mm.media = {
-                mimetype: media.mimetype,
-                data: media.data,
-                filename: m._data?.filename || null,
-              };
-          } catch {}
-        }
+        // downloadMedia мы больше нигде не вызываем
         mapped.push(mm);
       }
-      atomicWrite(msgFile(id), {
-        results: mapped,
-        savedAt: Date.now(),
-      });
+      atomicWrite(msgFile(id), { results: mapped, savedAt: Date.now() });
       return res.json({ results: mapped, live: true });
     } catch {
       return fallback();
@@ -702,17 +644,13 @@ app.post("/mark-seen", async (req, res) => {
   return res.json({ ok: true, live });
 });
 
-// ---- SEND TEXT/MEDIA/LOCATION (persist + emit immediately) ----
+// ---- SEND TEXT / LOCATION ----
 app.post("/send", async (req, res) => {
   try {
-    if (!isReady)
-      return res
-        .status(409)
-        .json({ error: "WHATSAPP_NOT_READY" });
+    if (!isReady) return res.status(409).json({ error: "WHATSAPP_NOT_READY" });
     const { text, quotedMessageId } = req.body || {};
     const target = normalizeTarget(req.body || {});
-    if (!text || !target)
-      return res.status(400).json({ error: "BAD_REQUEST" });
+    if (!text || !target) return res.status(400).json({ error: "BAD_REQUEST" });
     const options = {};
     if (quotedMessageId) options.quotedMessageId = quotedMessageId;
     const sent = await client.sendMessage(target, text, options);
@@ -721,11 +659,7 @@ app.post("/send", async (req, res) => {
     persistAndEmit(target, mapped);
 
     const ts = Number(mapped.timestamp || nowSec());
-    upsertChatLast(
-      target,
-      mapped.preview || mapped.body || "(chat)",
-      ts
-    );
+    upsertChatLast(target, mapped.preview || mapped.body || "(chat)", ts);
 
     res.json({ ok: true });
   } catch {
@@ -733,61 +667,12 @@ app.post("/send", async (req, res) => {
   }
 });
 
-app.post(
-  "/send-media",
-  upload.single("file"),
-  async (req, res) => {
-    try {
-      if (!isReady)
-        return res
-          .status(409)
-          .json({ error: "WHATSAPP_NOT_READY" });
-      const target = normalizeTarget(req.body || {});
-      if (!req.file || !target)
-        return res
-          .status(400)
-          .json({ error: "BAD_REQUEST" });
-      const media = MessageMedia.fromFilePath(req.file.path);
-      const options = {};
-      if (req.body?.caption) options.caption = req.body.caption;
-      if (req.body?.quotedMessageId)
-        options.quotedMessageId = req.body.quotedMessageId;
-      const sent = await client.sendMessage(
-        target,
-        media,
-        options
-      );
-
-      const mapped = mapMessage(sent, target);
-      persistAndEmit(target, mapped);
-
-      const ts = Number(mapped.timestamp || nowSec());
-      upsertChatLast(
-        target,
-        mapped.preview || "(media)",
-        ts
-      );
-
-      res.json({ ok: true });
-    } catch {
-      res.status(500).json({ error: "SEND_MEDIA_FAILED" });
-    }
-  }
-);
-
 app.post("/send-location", async (req, res) => {
   try {
-    if (!isReady)
-      return res
-        .status(409)
-        .json({ error: "WHATSAPP_NOT_READY" });
+    if (!isReady) return res.status(409).json({ error: "WHATSAPP_NOT_READY" });
     const target = normalizeTarget(req.body || {});
-    const {
-      latitude,
-      longitude,
-      description,
-      quotedMessageId,
-    } = req.body || {};
+    const { latitude, longitude, description, quotedMessageId } =
+      req.body || {};
     if (
       !target ||
       typeof latitude !== "number" ||
@@ -798,11 +683,7 @@ app.post("/send-location", async (req, res) => {
     if (quotedMessageId) options.quotedMessageId = quotedMessageId;
     const sent = await client.sendMessage(
       target,
-      new Location(
-        latitude,
-        longitude,
-        description || ""
-      ),
+      new Location(latitude, longitude, description || ""),
       options
     );
 
@@ -810,11 +691,7 @@ app.post("/send-location", async (req, res) => {
     persistAndEmit(target, mapped);
 
     const ts = Number(mapped.timestamp || nowSec());
-    upsertChatLast(
-      target,
-      mapped.preview || "(location)",
-      ts
-    );
+    upsertChatLast(target, mapped.preview || "(location)", ts);
 
     res.json({ ok: true });
   } catch {
@@ -826,37 +703,21 @@ app.post("/send-location", async (req, res) => {
 const statusHandler = (req, res) => {
   try {
     const { chatId, status } = req.body || {};
-    if (
-      !chatId ||
-      !["lead", "client", "declined"].includes(
-        String(status)
-      )
-    )
+    if (!chatId || !["lead", "client", "declined"].includes(String(status)))
       return res.status(400).json({ error: "BAD_REQUEST" });
     const id = sanitizeId(chatId);
     const stored = safeRead(chatsFile(), { results: [] });
     const arr = stored.results || [];
     const ix = arr.findIndex((x) => x.id === id);
-    if (ix < 0)
-      return res
-        .status(404)
-        .json({ error: "NOT_FOUND" });
+    if (ix < 0) return res.status(404).json({ error: "NOT_FOUND" });
 
     const prev =
-      arr[ix].status ||
-      (arr[ix].isLead === true ? "lead" : "client");
+      arr[ix].status || (arr[ix].isLead === true ? "lead" : "client");
     arr[ix].status = status;
     arr[ix].isLead = status === "lead";
 
-    atomicWrite(chatsFile(), {
-      results: sortChats(arr),
-      savedAt: Date.now(),
-    });
-    io.emit("chat-patch", {
-      id,
-      status,
-      isLead: arr[ix].isLead,
-    });
+    atomicWrite(chatsFile(), { results: sortChats(arr), savedAt: Date.now() });
+    io.emit("chat-patch", { id, status, isLead: arr[ix].isLead });
 
     const nowTs = nowSec();
     if (prev !== "client" && status === "client")
@@ -881,21 +742,13 @@ const flagHandler = (req, res) => {
     const stored = safeRead(chatsFile(), { results: [] });
     const arr = stored.results || [];
     const ix = arr.findIndex((x) => x.id === id);
-    if (ix < 0)
-      return res
-        .status(404)
-        .json({ error: "NOT_FOUND" });
+    if (ix < 0) return res.status(404).json({ error: "NOT_FOUND" });
 
     arr[ix].isLead = isLead;
-    const prev =
-      arr[ix].status ||
-      (isLead ? "lead" : "client");
+    const prev = arr[ix].status || (isLead ? "lead" : "client");
     arr[ix].status = isLead ? "lead" : "client";
 
-    atomicWrite(chatsFile(), {
-      results: sortChats(arr),
-      savedAt: Date.now(),
-    });
+    atomicWrite(chatsFile(), { results: sortChats(arr), savedAt: Date.now() });
     io.emit("chat-patch", {
       id,
       isLead: arr[ix].isLead,
@@ -906,12 +759,7 @@ const flagHandler = (req, res) => {
     if (prev !== "client" && arr[ix].status === "client")
       pushEventUniqueMonthly("client_new", id, nowTs);
 
-    res.json({
-      ok: true,
-      id,
-      isLead: arr[ix].isLead,
-      status: arr[ix].status,
-    });
+    res.json({ ok: true, id, isLead: arr[ix].isLead, status: arr[ix].status });
   } catch {
     res.status(500).json({ error: "FLAG_FAILED" });
   }
@@ -929,8 +777,7 @@ app.get("/analytics", (req, res) => {
       ? new Date(req.query.to + "T23:59:59").getTime() / 1000
       : nowSec();
     const a = readAnalytics();
-    const inRange = (ts) =>
-      Number(ts) >= from && Number(ts) <= to;
+    const inRange = (ts) => Number(ts) >= from && Number(ts) <= to;
     let leadsNew = 0,
       clientsNew = 0,
       declines = 0;
@@ -960,7 +807,7 @@ app.post("/logout", async (req, res) => {
       await fsp.rm(SESS_PATH, { recursive: true, force: true });
     } catch {}
     lastQR = null;
-    bootClient();
+    await bootClient();
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: "LOGOUT_FAILED" });
